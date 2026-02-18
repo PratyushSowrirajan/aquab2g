@@ -24,7 +24,10 @@ class WeatherClient:
 
     def __init__(self):
         self.session = requests.Session()
-        self.session.headers.update({"Accept": "application/json"})
+        self.session.headers.update({
+            "Accept": "application/json",
+            "Cache-Control": "no-cache",
+        })
 
     # -----------------------------------------------------------------
     # Current + 7-day history + 7-day forecast (single call)

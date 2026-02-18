@@ -33,16 +33,19 @@ def build_feature_vector(raw_data: Dict) -> Dict:
     lat = location.get("lat", 40.0)
 
     # --- 1. Temperature features ----------------------------------------
+    # compute_temperature_features expects (weather_data, historical_temp_df)
+    temp_feats = compute_temperature_features(weather, hist_temp)
+
+    # Derive water_temp and air_temp from the temperature feature output
+    water_temp = temp_feats.get("water_temp", 20.0)
     current = weather.get("current", {}) if weather else {}
-    air_temp = current.get("temperature", 20.0)
-    water_temp = estimate_water_temp(air_temp)
-    temp_feats = compute_temperature_features(hist_temp, water_temp, lat)
+    air_temp = current.get("temperature", 20.0) or 20.0
 
     # --- 2. Precipitation features --------------------------------------
-    precip_feats = compute_precipitation_features(rainfall, weather)
+    precip_feats = compute_precipitation_features(weather, rainfall)
 
     # --- 3. Nutrient proxy features -------------------------------------
-    nutrient_feats = compute_nutrient_features(land_use, precip_feats)
+    nutrient_feats = compute_nutrient_features(land_use, precip_feats, lat)
 
     # --- 4. Light / UV features -----------------------------------------
     light_feats = compute_light_features(weather, lat)
@@ -51,11 +54,19 @@ def build_feature_vector(raw_data: Dict) -> Dict:
     stag_feats = compute_stagnation_features(weather, precip_feats, water_temp)
 
     # --- Flat scores dict for models ------------------------------------
+    # temperature_features returns "bloom_temp_probability" not "temp_score"
+    # Derive a 0-100 temperature score from bloom_temp_probability + z_score
+    bloom_prob = temp_feats.get("bloom_temp_probability", 0.5)
+    z_score = temp_feats.get("z_score", 0.0)
+    import numpy as np
+    from scipy.special import expit
+    temp_score = float(expit(0.3 * (water_temp - 25.0) + 0.5 * z_score)) * 100
+
     scores = {
-        "temperature_score": temp_feats.get("temp_score", 50),
-        "nutrient_score": nutrient_feats.get("nutrient_score", 50),
-        "stagnation_score": stag_feats.get("stagnation_score", 50),
-        "light_score": light_feats.get("light_score", 50),
+        "temperature_score": round(min(max(temp_score, 0), 100), 1),
+        "nutrient_score":    nutrient_feats.get("nutrient_score", 50),
+        "stagnation_score":  stag_feats.get("stagnation_score", 50),
+        "light_score":       light_feats.get("light_score", 50),
     }
 
     return {
