@@ -38,6 +38,7 @@ from visualization.trend_chart import build_forecast_chart
 from visualization.risk_gauge import build_risk_gauge, build_component_gauges
 from visualization.component_breakdown import build_component_bar, build_monod_factors_chart
 from visualization.report_generator import generate_pdf_report
+from visualization.surface_heatmap import build_surface_heatmap, build_temp_timeline
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Page config
@@ -184,6 +185,7 @@ def run_full_pipeline(lat: float, lon: float):
         "heatmap_points": heatmap_points,
         "who_info": who_info,
         "wind_dir": wind_dir,
+        "thermal_grid": raw.get("thermal_grid", []),
     }
 
 
@@ -286,6 +288,7 @@ with st.sidebar:
     st.markdown("""
     <div style="font-size:0.78rem;line-height:1.8;color:#555;">
       🟢 <b>Open-Meteo API</b> — Live weather (no key)<br>
+      🟢 <b>Satellite Thermal</b> — SST / ERA5 / NASA POWER<br>
       🟢 <b>CyFi / NASA</b> — Satellite ML bloom prediction<br>
       🟢 <b>ESA WorldCover</b> — Land use classification<br>
       🟢 <b>WHO 2003</b> — Recreational water guidelines<br>
@@ -380,6 +383,7 @@ heatmap_pts = result["heatmap_points"]
 who_info    = result["who_info"]
 fv          = result["feature_vector"]
 wind_dir    = result["wind_dir"]
+thermal_grid = result.get("thermal_grid", [])
 dq          = raw["data_quality"]
 
 risk_score  = risk["risk_score"]
@@ -437,23 +441,76 @@ st.markdown(f"""
 # ─────────────────────────────────────────────────────────────────────────────
 m1, m2, m3, m4, m5 = st.columns(5)
 with m1:
-    st.metric("Risk Score", f"{risk_score:.0f}/100", help="0=safe, 100=critical bloom risk")
+    limiting = risk.get("limiting_driver", "")
+    st.metric(
+        "Risk Score", f"{risk_score:.0f}/100",
+        delta=f"Limited by {limiting}" if risk_score < 40 else None,
+        delta_color="off",
+        help="0 = safe, 100 = critical bloom risk. "
+             "Geometric mean of Temperature (35%), Nutrients (25%), "
+             "Stagnation (22%), Light (18%). A near-zero component "
+             "collapses the score — matching biological reality.",
+    )
 with m2:
     wt = fv.get("water_temp", 0)
     at = fv.get("air_temp", 0)
-    st.metric("Water Temp", f"{wt:.1f}°C", delta=f"Air: {at:.1f}°C")
+    wt_src = fv["temperature"].get("water_temp_source", "estimated")
+    wt_icon = "🛰" if wt_src == "satellite" else "🔧"
+    st.metric("Water Temp", f"{wt:.1f}°C", delta=f"{wt_icon} {wt_src.title()} · Air: {at:.1f}°C")
 with m3:
     mu = gr.get("mu_per_day", 0)
     dbl = gr.get("doubling_time_hours")
-    st.metric("Growth Rate (µ)", f"{mu:.3f}/day",
-              delta=f"Doubling: {dbl:.0f}h" if dbl else "No growth")
+    wt_for_growth = fv.get("water_temp", 20)
+    if dbl:
+        growth_delta = f"Doubling: {dbl:.0f}h"
+    elif wt_for_growth < 12:
+        growth_delta = f"❄ Water too cold ({wt_for_growth:.0f}°C < 12°C)"
+    else:
+        growth_delta = "No growth"
+    st.metric(
+        "Growth Rate (µ)", f"{mu:.3f}/day",
+        delta=growth_delta,
+        delta_color="off",
+        help="Monod kinetics: µ = µ_max × f(T) × f(N) × f(L) × f(S). "
+             "Cyanobacteria optimal growth at 28°C; near-zero below 12°C.",
+    )
 with m4:
     precip = fv["precipitation"].get("rainfall_7d", 0)
     days_dry = fv["precipitation"].get("days_since_significant_rain", 0)
-    st.metric("Rain (7d)", f"{precip:.0f} mm", delta=f"{days_dry}d since rain")
+    rain_delta_color = "inverse" if days_dry >= 7 else "normal"
+    st.metric(
+        "Rain (7d)", f"{precip:.0f} mm",
+        delta=f"↑ {days_dry}d since ≥5 mm rain",
+        delta_color="off",
+        help="Significant rain = ≥ 5 mm/day. Dry spells increase stagnation "
+             "and surface accumulation of cyanobacteria. Light drizzle "
+             "(< 5 mm) does not flush nutrients or break stratification.",
+    )
 with m5:
     wind = fv["stagnation"].get("avg_wind_7d", 0)
     st.metric("Avg Wind", f"{wind:.0f} km/h")
+
+# Context explanation when a single factor dominates the score
+_wt = fv.get("water_temp", 20)
+_limiting = risk.get("limiting_driver", "")
+_scores = risk.get("component_scores", {})
+if _wt < 12 and _limiting == "Temperature":
+    st.info(
+        f"🧊 **Water temperature ({_wt:.1f}°C) is suppressing all risk.** "
+        f"Cyanobacteria require ≥15°C to grow and thrive at ~28°C. "
+        f"At current temperature, biological growth is near zero regardless of "
+        f"other factors (Stagnation {_scores.get('Stagnation', 0):.0f}/100, "
+        f"Nutrients {_scores.get('Nutrients', 0):.0f}/100). "
+        f"Risk will increase as water warms in spring/summer.",
+        icon="❄️",
+    )
+elif days_dry >= 14 and risk_score < 40:
+    st.info(
+        f"🏜️ **{days_dry} days without significant rain (≥5 mm).** "
+        f"Stagnation is elevated but overall risk remains {risk_level} "
+        f"because temperature ({_wt:.1f}°C) limits cyanobacterial growth.",
+        icon="💧",
+    )
 
 st.divider()
 
@@ -499,6 +556,71 @@ with score_col:
     if all_factors:
         tags_html = "".join(f'<span class="factor-tag">{f}</span>' for f in all_factors[:6])
         st.markdown(f"**Key Factors:**<br>{tags_html}", unsafe_allow_html=True)
+
+st.divider()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ③b Surface Temperature Heat Map
+# ─────────────────────────────────────────────────────────────────────────────
+st.subheader("🌡 Surface Temperature Heat Map")
+
+temp_info = fv.get("temperature", {})
+wt_source = temp_info.get("water_temp_source", "estimated")
+wt_source_detail = temp_info.get("water_temp_source_detail", "")
+wt_confidence = temp_info.get("water_temp_confidence", "LOW")
+
+# Source badge
+src_badge_color = {"satellite": "#2ecc71", "estimated": "#e67e22"}.get(wt_source, "#aaa")
+src_badge_icon = "🛰" if wt_source == "satellite" else "🔧"
+st.markdown(f"""
+<div style="display:flex;gap:12px;align-items:center;margin-bottom:8px;flex-wrap:wrap;">
+  <div style="background:{src_badge_color}18;border:1px solid {src_badge_color};border-radius:6px;
+              padding:4px 12px;font-size:0.85rem;font-weight:600;color:{src_badge_color};">
+    {src_badge_icon} Water Temp Source: {wt_source.upper()}
+  </div>
+  <div style="font-size:0.82rem;color:#666;">
+    {wt_source_detail} · Confidence: <b>{wt_confidence}</b>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+heat_col, timeline_col = st.columns([1.4, 1.0], gap="medium")
+
+with heat_col:
+    thermal_map = build_surface_heatmap(
+        thermal_grid, lat, lon,
+        water_temp=fv.get("water_temp", 20.0),
+        water_temp_source=wt_source,
+        source_detail=wt_source_detail,
+    )
+    st_folium(thermal_map, height=420, width="100%", returned_objects=[])
+
+with timeline_col:
+    sat_7d = temp_info.get("satellite_skin_7d", [])
+    sat_dates = temp_info.get("satellite_skin_dates", [])
+    fig_timeline = build_temp_timeline(sat_7d, sat_dates, wt_source)
+    if fig_timeline:
+        st.plotly_chart(fig_timeline, width='stretch', config={"displayModeBar": False})
+    else:
+        st.info("📊 Insufficient 7-day satellite skin temperature data for timeline chart.")
+
+    # Temperature comparison panel
+    est_temp = fv["temperature"].get("water_temp", 0)
+    air_temp_now = fv["temperature"].get("current_air_temp", 0)
+    baseline = fv["temperature"].get("seasonal_baseline", 0)
+    anomaly = fv["temperature"].get("temp_anomaly_c", 0)
+
+    st.markdown(f"""
+    <div style="background:#f0f9ff;border-radius:8px;padding:12px 16px;margin-top:8px;
+                border:1px solid #bae6fd;font-size:0.85rem;line-height:1.8;">
+      <b>🌡 Temperature Summary</b><br>
+      Water Surface: <b>{est_temp:.1f}°C</b> ({wt_source})<br>
+      Air Temperature: {air_temp_now:.1f}°C<br>
+      Seasonal Baseline: {baseline:.1f}°C<br>
+      Anomaly: <b style="color:{'#e74c3c' if anomaly > 2 else '#333'};">{anomaly:+.1f}°C</b><br>
+      Bloom Threshold: 25.0°C {'⚠️ EXCEEDED' if est_temp >= 25 else '✅ Below'}
+    </div>
+    """, unsafe_allow_html=True)
 
 st.divider()
 
@@ -566,7 +688,7 @@ with cond_col:
     current = (raw.get("weather") or {}).get("current", {})
     conditions = {
         "🌡 Air Temperature":   f"{current.get('temperature', 0):.1f}°C",
-        "🌊 Water Temperature": f"{fv.get('water_temp', 0):.1f}°C",
+        "🌊 Water Temperature": f"{fv.get('water_temp', 0):.1f}°C ({wt_source})",
         "💧 Humidity":          f"{current.get('humidity', 0):.0f}%",
         "💨 Wind Speed":        f"{current.get('wind_speed', 0):.1f} km/h",
         "☀️ UV Index":          f"{current.get('uv_index', 0):.1f}",
@@ -586,7 +708,7 @@ st.divider()
 # ⑥b Data Reliability Panel
 # ─────────────────────────────────────────────────────────────────────────────
 with st.expander("📋 Data Reliability & Source Details", expanded=False):
-    r1, r2, r3 = st.columns(3)
+    r1, r2, r3, r4 = st.columns(4)
     data_errors = dq.get("errors", {})
 
     with r1:
@@ -616,6 +738,16 @@ with st.expander("📋 Data Reliability & Source Details", expanded=False):
         - Temperature history: {'5 years ✓' if hist_ok else '⚠️ Partial'}
         - Land use: {'ESA WorldCover ✓' if land_ok else '⚠️ Default'}
         - Rainfall history: {'30 days ✓' if 'rainfall_history' not in data_errors else '⚠️ Partial'}
+        """)
+    with r4:
+        thermal_ok = "satellite_thermal" not in data_errors
+        thermal_src = temp_info.get("water_temp_source_detail", "Unknown")
+        st.markdown(f"""
+        **Satellite Thermal** {'🟢' if thermal_ok and wt_source == 'satellite' else ('🟡' if thermal_ok else '🔴')}
+        - Source: {thermal_src[:40]}
+        - Water temp: {wt_source.title()} · {wt_confidence}
+        - Resolution: {(raw.get('satellite_thermal') or {}).get('resolution', '~25 km')}
+        - Fallback: Air→Water model (L&L 1998)
         """)
 
     if data_errors:
@@ -672,6 +804,7 @@ with meta_col:
       <b>🎯 Confidence:</b> {confidence}<br>
       <b>🌦 Weather:</b> Open-Meteo API (real-time, free)<br>
       <b>🛰 Satellite:</b> CyFi (NASA/DrivenData)<br>
+      <b>🌡 Water Temp:</b> {wt_source.title()} — {wt_source_detail}<br>
       <b>🗺 Land use:</b> ESA WorldCover v200<br>
       <b>🏥 Thresholds:</b> WHO 2003 Recreational Water Guidelines
     </div>

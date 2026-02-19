@@ -6,7 +6,8 @@ Statistical techniques:
   - Z-score anomaly detection
   - Linear regression (7-day warming trend)
   - Percentile ranking
-  - Water temp estimation from air temp (Livingstone & Lotter 1998)
+  - Satellite thermal data (Open-Meteo Marine SST / ERA5 skin / NASA POWER)
+  - Fallback: Water temp estimation from air temp (Livingstone & Lotter 1998)
 """
 
 import numpy as np
@@ -25,6 +26,7 @@ def estimate_water_temp(
     """
     Estimate surface water temperature from air temperature.
     Livingstone & Lotter (1998), Boreal Environment Research.
+    Used ONLY as fallback when satellite thermal data is unavailable.
     """
     base = 0.65 * current_air_temp + 0.35 * avg_air_temp_7d
     wind_cooling = max(0.0, (wind_speed_kmh - 5.0) * 0.08)
@@ -36,8 +38,21 @@ def estimate_water_temp(
 def compute_temperature_features(
     weather_data: Dict,
     historical_temp_df: Optional[pd.DataFrame],
+    satellite_thermal: Optional[Dict] = None,
 ) -> Dict:
-    """Compute all temperature-derived features for the model."""
+    """Compute all temperature-derived features for the model.
+
+    Parameters
+    ----------
+    weather_data : dict
+        Current weather from Open-Meteo API.
+    historical_temp_df : DataFrame or None
+        5-year historical daily temperature.
+    satellite_thermal : dict or None
+        Satellite-derived surface temperature from SatelliteThermalClient.
+        Keys: water_surface_temp, skin_temp_current, skin_temp_7d, source, method,
+              resolution, confidence.
+    """
     current = weather_data.get("current", {})
     daily = weather_data.get("daily", {})
 
@@ -50,12 +65,37 @@ def compute_temperature_features(
     past_temps = temp_means[:7] if len(temp_means) >= 7 else temp_means
     avg_7d = np.mean(past_temps) if past_temps else current_temp
 
-    # Water temperature estimate
-    water_temp = estimate_water_temp(current_temp, avg_7d, wind_speed, humidity)
+    # ─── Water temperature: prefer satellite, fallback to air-temp model ──
+    water_temp_source = "estimated"
+    satellite_source_detail = ""
+    satellite_confidence = "LOW"
+
+    sat = satellite_thermal or {}
+    sat_water_temp = sat.get("water_surface_temp")
+
+    if sat_water_temp is not None and sat.get("source", "none") != "none":
+        # Use satellite-derived temperature
+        water_temp = round(float(sat_water_temp), 1)
+        water_temp_source = "satellite"
+        satellite_source_detail = sat.get("source", "")
+        satellite_confidence = sat.get("confidence", "MEDIUM")
+    else:
+        # Fallback: air-temp estimation (Livingstone & Lotter 1998)
+        water_temp = estimate_water_temp(current_temp, avg_7d, wind_speed, humidity)
+        water_temp_source = "estimated"
+        satellite_source_detail = "Livingstone & Lotter 1998 (air→water model)"
+        satellite_confidence = "LOW"
+
+    # Satellite 7-day skin temperature series (if available)
+    sat_skin_7d = sat.get("skin_temp_7d", [])
+    sat_skin_dates = sat.get("skin_temp_dates", [])
 
     # 7-day warming trend (slope of linear regression)
-    if len(past_temps) >= 4:
-        slope, _, r_value, p_value, _ = stats.linregress(range(len(past_temps)), past_temps)
+    # Prefer satellite skin temp series if available, else air temp
+    trend_series = sat_skin_7d if len(sat_skin_7d) >= 4 else past_temps
+
+    if len(trend_series) >= 4:
+        slope, _, r_value, p_value, _ = stats.linregress(range(len(trend_series)), trend_series)
         warming_trend = round(slope, 3)
         trend_significant = p_value < 0.1
     else:
@@ -101,11 +141,18 @@ def compute_temperature_features(
         factors.append(f"Temperature anomaly: z-score {z_score} (significantly above baseline)")
     if percentile > 90:
         factors.append(f"Current temp is in {percentile}th percentile for this month")
+    if water_temp_source == "satellite":
+        factors.append(f"Water temp from {satellite_source_detail}")
 
     return {
         "current_air_temp": current_temp,
         "avg_air_temp_7d": round(avg_7d, 1),
         "water_temp": water_temp,
+        "water_temp_source": water_temp_source,
+        "water_temp_source_detail": satellite_source_detail,
+        "water_temp_confidence": satellite_confidence,
+        "satellite_skin_7d": sat_skin_7d,
+        "satellite_skin_dates": sat_skin_dates,
         "warming_trend_per_day": warming_trend,
         "trend_significant": trend_significant,
         "z_score": z_score,

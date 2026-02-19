@@ -31,10 +31,11 @@ def build_feature_vector(raw_data: Dict) -> Dict:
     land_use = raw_data.get("land_use") or {}
     location = raw_data.get("location") or {}
     lat = location.get("lat", 40.0)
+    satellite_thermal = raw_data.get("satellite_thermal")
 
     # --- 1. Temperature features ----------------------------------------
-    # compute_temperature_features expects (weather_data, historical_temp_df)
-    temp_feats = compute_temperature_features(weather, hist_temp)
+    # compute_temperature_features expects (weather_data, historical_temp_df, satellite_thermal)
+    temp_feats = compute_temperature_features(weather, hist_temp, satellite_thermal)
 
     # Derive water_temp and air_temp from the temperature feature output
     water_temp = temp_feats.get("water_temp", 20.0)

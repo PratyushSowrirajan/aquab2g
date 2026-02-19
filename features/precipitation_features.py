@@ -38,6 +38,13 @@ def compute_precipitation_features(
             days_since_rain = len(rain_series) - 1 - i
             break
 
+    # Days since any measurable rain (>0.1mm)
+    days_since_any_rain = len(rain_series)
+    for i in range(len(rain_series) - 1, -1, -1):
+        if rain_series[i] > 0.1:
+            days_since_any_rain = len(rain_series) - 1 - i
+            break
+
     # Stagnation index (0-1)
     if len(rain_series) >= 7:
         weekly_rain = np.sum(rain_series[-7:])
@@ -83,6 +90,7 @@ def compute_precipitation_features(
         "rainfall_7d": round(rainfall_7d, 1),
         "rainfall_30d": round(rainfall_30d, 1),
         "days_since_significant_rain": days_since_rain,
+        "days_since_any_rain": days_since_any_rain,
         "stagnation_index": stagnation,
         "first_flush_event": first_flush,
         "rainfall_intensity": intensity,
